@@ -1,0 +1,124 @@
+# import frappe
+
+
+# def set_missing_values(source, target, *args, **kwargs):
+#     target.stock_entry_type = target.stock_entry_type or "Material Transfer"
+
+
+# def update_item(source_doc, target_doc, source_parent, *args, **kwargs):
+#     qty = frappe.utils.flt(source_doc.qty) - frappe.utils.flt(source_doc.delivered_qty)
+#     target_doc.qty = qty if qty > 0 else frappe.utils.flt(source_doc.qty)
+#     target_doc.uom = source_doc.uom
+#     target_doc.stock_uom = source_doc.stock_uom
+#     target_doc.conversion_factor = source_doc.conversion_factor or 1
+#     target_doc.basic_rate = source_doc.rate
+#     target_doc.rate = source_doc.rate
+#     target_doc.amount = source_doc.amount
+#     target_doc.custom_customer_name = source_parent.customer
+
+#     custom_fields = [
+#         "custom_project_code",
+#         "custom_finish_length",
+#         "custom_finish_width",
+#         "custom_finish_thickness",
+#         "custom_raw_length",
+#         "custom_raw_width",
+#         "custom_raw_thickness",
+#         "custom_material_rate",
+#         "custom_weight",
+#         "custom_batch_no"
+#     ]
+#     for field in custom_fields:
+#         value = source_doc.get(field)
+#         if value is not None:
+#             target_doc.set(field, value)
+
+
+# @frappe.whitelist()
+# def make_stock_entry_from_sales_order(source_name, target_doc=None, *args, **kwargs):
+#     doc = frappe.model.mapper.get_mapped_doc(
+#         "Sales Order",
+#         source_name,
+#         {
+#             "Sales Order": {
+#                 "doctype": "Stock Entry",
+#                 "validation": {
+#                     "docstatus": ["=", 1]
+#                 },
+#                 "postprocess": set_missing_values
+#             },
+#             "Sales Order Item": {
+#                 "doctype": "Stock Entry Detail",
+#                 "postprocess": update_item
+#             }
+#         },
+#         target_doc
+#     )
+
+#     return doc
+
+
+
+
+import frappe
+
+
+def set_missing_values(source, target, *args, **kwargs):
+    target.stock_entry_type = target.stock_entry_type or "Material Transfer"
+
+
+def update_item(source_doc, target_doc, source_parent, *args, **kwargs):
+    qty = frappe.utils.flt(source_doc.qty) - frappe.utils.flt(source_doc.delivered_qty)
+    target_doc.qty = qty if qty > 0 else frappe.utils.flt(source_doc.qty)
+    target_doc.uom = source_doc.uom
+    target_doc.stock_uom = source_doc.stock_uom
+    target_doc.conversion_factor = source_doc.conversion_factor or 1
+    target_doc.basic_rate = source_doc.rate
+    target_doc.rate = source_doc.rate
+    target_doc.amount = source_doc.amount
+    target_doc.custom_customer_name = source_parent.customer
+
+    # Source Warehouse: Sales Order Item's warehouse -> Stock Entry Detail's s_warehouse
+    if source_doc.warehouse:
+        target_doc.s_warehouse = source_doc.warehouse
+
+    custom_fields = [
+        "custom_project_code",
+        "custom_finish_length",
+        "custom_finish_width",
+        "custom_finish_thickness",
+        "custom_raw_length",
+        "custom_raw_width",
+        "custom_raw_thickness",
+        "custom_material_rate",
+        "custom_weight",
+        "custom_batch_no"
+    ]
+    for field in custom_fields:
+        value = source_doc.get(field)
+        if value is not None:
+            target_doc.set(field, value)
+
+
+@frappe.whitelist()
+def make_stock_entry_from_sales_order(source_name, target_doc=None, *args, **kwargs):
+    doc = frappe.model.mapper.get_mapped_doc(
+        "Sales Order",
+        source_name,
+        {
+            "Sales Order": {
+                "doctype": "Stock Entry",
+                "validation": {
+                    "docstatus": ["=", 1]
+                },
+                "postprocess": set_missing_values
+            },
+            "Sales Order Item": {
+                "doctype": "Stock Entry Detail",
+                "postprocess": update_item
+            }
+        },
+        target_doc
+    )
+
+    return doc
