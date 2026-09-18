@@ -16,6 +16,10 @@
 #     target_doc.amount = source_doc.amount
 #     target_doc.custom_customer_name = source_parent.customer
 
+#     # Source Warehouse: Sales Order Item's warehouse -> Stock Entry Detail's s_warehouse
+#     if source_doc.warehouse:
+#         target_doc.s_warehouse = source_doc.warehouse
+
 #     custom_fields = [
 #         "custom_project_code",
 #         "custom_finish_length",
@@ -60,6 +64,8 @@
 
 
 
+
+
 import frappe
 
 
@@ -78,7 +84,6 @@ def update_item(source_doc, target_doc, source_parent, *args, **kwargs):
     target_doc.amount = source_doc.amount
     target_doc.custom_customer_name = source_parent.customer
 
-    # Source Warehouse: Sales Order Item's warehouse -> Stock Entry Detail's s_warehouse
     if source_doc.warehouse:
         target_doc.s_warehouse = source_doc.warehouse
 
@@ -101,7 +106,21 @@ def update_item(source_doc, target_doc, source_parent, *args, **kwargs):
 
 
 @frappe.whitelist()
-def make_stock_entry_from_sales_order(source_name, target_doc=None, *args, **kwargs):
+def make_stock_entry_from_sales_order(source_name, target_doc=None, args=None, **kwargs):
+    # map_docs (allow_child_item_selection wale flow mein) is function ko
+    # positionally call karta hai: method(source_name, target_doc, args)
+    # jaha "args" ek poora dict hota hai:
+    #   {"customer": ..., "allow_child_item_selection": 1,
+    #    "filtered_children": [<selected Sales Order Item row names>]}
+    # Isliye humein khud dict ke andar se "filtered_children" nikaalna hoga.
+    args = args or {}
+    filtered_children = args.get("filtered_children")
+
+    def item_condition(source_doc):
+        if not filtered_children:
+            return True  # koi selection nahi -> sab allow (safe fallback)
+        return source_doc.name in filtered_children
+
     doc = frappe.model.mapper.get_mapped_doc(
         "Sales Order",
         source_name,
@@ -115,6 +134,7 @@ def make_stock_entry_from_sales_order(source_name, target_doc=None, *args, **kwa
             },
             "Sales Order Item": {
                 "doctype": "Stock Entry Detail",
+                "condition": item_condition,
                 "postprocess": update_item
             }
         },
