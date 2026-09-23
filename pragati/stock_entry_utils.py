@@ -80,9 +80,52 @@
 
 
 
-
-
 import frappe
+from frappe.query_builder.functions import Sum
+
+
+def get_sales_order_link_fieldname():
+    """
+    Dynamically find the Stock Entry Detail field that links back to
+    Sales Order - mirrors the same lookup the client-side duplicate-fetch
+    guard already does, so this keeps working even if that field is
+    ever renamed.
+    """
+
+    meta = frappe.get_meta("Stock Entry Detail")
+
+    for df in meta.fields:
+        if df.fieldtype == "Link" and df.options == "Sales Order":
+            return df.fieldname
+
+    return None
+
+
+def get_already_consumed_qty(sales_order, item_code, link_fieldname):
+    """
+    Sum of custom_weight ("Qty") already pulled into any non-cancelled
+    Stock Entry (Draft or Submitted, any customer) for this Sales Order +
+    Item Code combination. This is what makes the "remaining" balance
+    correct across customers and across drafts, not just within the
+    Stock Entry currently open.
+    """
+
+    if not link_fieldname:
+        return 0
+
+    sed = frappe.qb.DocType("Stock Entry Detail")
+    link_field = getattr(sed, link_fieldname)
+
+    result = (
+        frappe.qb.from_(sed)
+        .select(Sum(sed.custom_weight).as_("total"))
+        .where(link_field == sales_order)
+        .where(sed.item_code == item_code)
+        .where(sed.docstatus != 2)
+        .run(as_dict=True)
+    )
+
+    return frappe.utils.flt(result[0].total) if result and result[0].total else 0
 
 
 def set_missing_values(source, target, *args, **kwargs):
@@ -154,6 +197,29 @@ def update_item(source_doc, target_doc, source_parent, *args, **kwargs):
         if value is not None:
             target_doc.set(field, value)
 
+    # Default "Qty" (custom_weight) to the REMAINING balance instead of
+    # always copying the Sales Order Item's full original quantity -
+    # subtract whatever has already been pulled into any other Stock
+    # Entry (any customer, Draft or Submitted) for this same Sales
+    # Order + Item Code.
+    link_fieldname = get_sales_order_link_fieldname()
+
+    if link_fieldname:
+        already_consumed = get_already_consumed_qty(
+            source_parent.name, source_doc.item_code, link_fieldname
+        )
+
+        remaining = (
+            frappe.utils.flt(source_doc.custom_weight) - already_consumed
+        )
+
+        target_doc.custom_weight = remaining if remaining > 0 else 0
+
+        # Keep the link back to the Sales Order populated so future
+        # fetches - for this or any other customer - can see this
+        # quantity was already allocated here.
+        target_doc.set(link_fieldname, source_parent.name)
+
 
 @frappe.whitelist()
 def make_stock_entry_from_sales_order(
@@ -173,15 +239,9 @@ def make_stock_entry_from_sales_order(
         Cancelled SO   (docstatus = 2)
     """
 
-    # ------------------------------------------------------------
-    # STEP 1: LOAD SALES ORDER
-    # ------------------------------------------------------------
 
     so = frappe.get_doc("Sales Order", source_name)
 
-    # ------------------------------------------------------------
-    # STEP 2: BLOCK CANCELLED SALES ORDER
-    # ------------------------------------------------------------
 
     if so.docstatus == 2:
         frappe.throw(
@@ -190,29 +250,37 @@ def make_stock_entry_from_sales_order(
             )
         )
 
-    # Draft (0) and Submitted (1) are allowed
-    # No docstatus=1 restriction here
-
-    # ------------------------------------------------------------
-    # STEP 3: GET SELECTED SALES ORDER ITEMS
-    # ------------------------------------------------------------
-
     args = args or {}
 
     filtered_children = args.get("filtered_children")
 
+    link_fieldname = get_sales_order_link_fieldname()
+    skipped_items = []
+
     def item_condition(source_doc):
 
-        # If child rows are selected in the dialog,
-        # map only those selected rows
-        if not filtered_children:
-            return True
+        if filtered_children and source_doc.name not in filtered_children:
+            return False
 
-        return source_doc.name in filtered_children
+        # Exclude items that are already fully allocated - whether that
+        # happened on this same Sales Order for another customer, or on
+        # an earlier Draft Stock Entry that hasn't even been submitted yet.
+        if link_fieldname:
+            already_consumed = get_already_consumed_qty(
+                source_name, source_doc.item_code, link_fieldname
+            )
 
-    # ------------------------------------------------------------
-    # STEP 4: MAP SALES ORDER TO STOCK ENTRY
-    # ------------------------------------------------------------
+            remaining = (
+                frappe.utils.flt(source_doc.custom_weight) - already_consumed
+            )
+
+            if remaining <= 0:
+                if source_doc.item_code not in skipped_items:
+                    skipped_items.append(source_doc.item_code)
+                return False
+
+        return True
+
 
     doc = frappe.model.mapper.get_mapped_doc(
         "Sales Order",
@@ -220,10 +288,6 @@ def make_stock_entry_from_sales_order(
         {
             "Sales Order": {
                 "doctype": "Stock Entry",
-
-                # IMPORTANT:
-                # Removed docstatus=1 validation.
-                # Draft and Submitted SOs can now be mapped.
 
                 "postprocess": set_missing_values
             },
@@ -236,5 +300,14 @@ def make_stock_entry_from_sales_order(
         },
         target_doc
     )
+
+    if skipped_items:
+        frappe.msgprint(
+            "Skipped {0} - already fully allocated to another Stock Entry.".format(
+                ", ".join(skipped_items)
+            ),
+            indicator="orange",
+            alert=True
+        )
 
     return doc
